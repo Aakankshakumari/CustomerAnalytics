@@ -1,0 +1,587 @@
+---
+title: "Customer Analytics Project"
+output: 
+  flexdashboard::flex_dashboard:
+    theme: journal
+    
+    orientation: columns
+    vertical_layout: fill
+    
+---
+<style>                     
+.navbar {
+  background-color:green;
+  border-color:blue;
+}
+.navbar-brand {
+color:black!important;
+}
+</style>           
+---
+
+```{r setup, include=FALSE}
+library(flexdashboard)
+library(data.table)
+library(dplyr)
+library(ggplot2)
+library(knitr)
+library(stringr)
+library(DT)
+library(ggthemes)
+library(plyr)
+library(readr)
+library(arules)
+library(arulesViz)
+library(methods)
+library(treemap)
+library(visNetwork)
+library(igraph)
+
+orders <- fread('data/orders.csv')
+products <- fread('data/products.csv')
+order_products <- fread('data/order_products__train.csv')
+order_products_prior <- fread('data/order_products__prior.csv')
+aisles <- fread('data/aisles.csv')
+departments <- fread('data/departments.csv')
+
+
+```
+
+Exploratory Data Analysis
+=====================================  
+    
+Column {.tabset}
+-------------------------------------
+   
+### Dataset OverView
+
+Lets first have a look at provided datasets:
+
+#### orders
+
+This file gives a list of all orders we have in the dataset. 1 row per order. 
+
+```{r, result='asis'}
+kable(head(orders,5))
+glimpse(orders)
+```
+
+
+#### order_products_train
+
+This file gives us information about which products (product_id) were ordered. It also contains information of the order (add_to_cart_order) in which the products were put into the cart and information of whether this product is a re-order(1) or not(0).
+
+
+```{r}
+kable(head(order_products,5))
+glimpse(order_products)
+```
+
+#### products
+
+This file contains the names of the products with their corresponding product_id. 
+
+```{r}
+kable(head(products,5))
+glimpse(products)
+```
+
+#### order_products_prior
+
+This file is structurally the same as the other_products_train.csv. 
+
+```{r, result='asis'}
+kable(head(order_products_prior,5))
+glimpse(order_products_prior)
+```
+
+
+#### aisles
+
+This file contains the different aisles.
+
+```{r, result='asis'}
+kable(head(aisles,5))
+glimpse(aisles)
+```
+
+#### departments
+
+```{r, result='asis'}
+kable(head(departments,5))
+glimpse(departments)
+```
+
+```{r message=FALSE, warning=FALSE}
+orders <- orders %>% mutate(order_hour_of_day = as.numeric(order_hour_of_day), eval_set = as.factor(eval_set))
+products <- products %>% mutate(product_name = as.factor(product_name))
+aisles <- aisles %>% mutate(aisle = as.factor(aisle))
+departments <- departments %>% mutate(department = as.factor(department))
+```
+
+
+### Order Frequency
+
+When people buy groceries online. 
+
+
+#### Hour of Day
+Most people order between 9:00 AM to 6:00 PM in the evening.
+```{r, fig.width=4.5,fig.height=3.5}
+orders %>% 
+  ggplot(aes(x=order_hour_of_day,color="coralred",fill="blue")) + 
+  geom_histogram(stat="count")+
+  theme_hc()+ scale_colour_hc()
+
+```
+
+#### Day of Week
+Sunday and Monday are the days when people order most on Instacart
+
+```{r, fig.width=4.5,fig.height=3.5}
+
+orders %>% 
+  ggplot(aes(x=order_dow,color="coralred",fill="coralred")) + 
+  geom_histogram(stat="count")+
+  theme_hc()+ scale_colour_hc()
+```
+
+#### Re-order analysis
+find two categories of people! One that reorders monthly other who does weekly. This is based on the peaks formed at 30th day and 7th day. 
+```{r, fig.width=7.5,fig.height=4.5}
+library(plyr)
+library(dplyr)
+Reordering_Gap<-count(orders,'days_since_prior_order')%>%arrange(desc(freq))%>%mutate(Percent_orders=round(freq*100/nrow(orders)),2)
+
+#Inference: 11 % of the time people reorder monthly(after 30 days), and 9 % of the time weekly. This shows there is a section of people who refill their groceries every month and other who refills every week. Frequency of NA represents total number of unique users and its their first order.
+
+#Visualizing reordering Gap
+
+Reordering_Gap_plot<-ggplot(orders,aes(x=days_since_prior_order))+
+  geom_histogram(aes(fill=..count..),binwidth=1)+
+  scale_x_continuous(name = "Days Since Prior Order",breaks = seq(0, 30, 1))+
+  scale_y_continuous(name = "Frequency of Orders",breaks=seq(0,1000000,100000))+
+  ggtitle("When customers order")+
+  labs(x="Days Since Prior Order")+
+  theme_update()
+Reordering_Gap_plot
+```
+
+
+### Department
+
+#### Which department is most commonly purchased by Day of Week (Top 5 Departments)
+```{r, fig.width=6,fig.height=5}
+
+products_departments <-
+  merge(products, departments, by = "department_id")
+
+## Creating initial data frame - nothing aggregated
+sku_level_orders <- left_join(
+  right_join(orders, order_products[, c("order_id", "product_id")],
+             by = "order_id"),
+  products_departments,
+  by = "product_id"
+)
+
+## Most popular departments by day of week (all departments ranked)
+department_purchases_dow <-
+  aggregate(product_id ~ department + order_dow, sku_level_orders, FUN = length)
+names(department_purchases_dow) <-
+  c("department", "order_dow", "num_of_orders")
+
+## Creating vector corresponding to day of week name order was placed 
+department_purchases_dow$day_week_name <-
+  ifelse(
+    department_purchases_dow$order_dow == 0,
+    "Sunday",
+    ifelse(
+      department_purchases_dow$order_dow == 1,
+      "Monday",
+      ifelse(
+        department_purchases_dow$order_dow == 2,
+        "Tuesday",
+        ifelse(
+          department_purchases_dow$order_dow == 3,
+          "Wednesday",
+          ifelse(
+            department_purchases_dow$order_dow == 4,
+            "Thursday",
+            ifelse(
+              department_purchases_dow$order_dow == 5,
+              "Friday",
+              ifelse(department_purchases_dow$order_dow == 6, "Saturday", "")
+            )
+          )
+        )
+      )
+    )
+  )
+
+
+## Creating list of week days to run through for loop
+day_of_week <- unique(department_purchases_dow$day_week_name)
+
+
+## Temporary dataframes used in for loop
+temp_df <- ""
+temp_df <- as.data.frame(temp_df)
+x_temp <- ""
+x_temp <- as.data.frame(x_temp)
+department_dow_top5 <- ""
+department_dow_top5 <- as.data.frame(department_dow_top5)
+
+# Top N Number of departments to graph
+n = 5
+for (each_day in day_of_week) {
+  temp_df <-
+    department_purchases_dow[department_purchases_dow$day_week_name %in% each_day, ]
+  x_temp <- temp_df[order(-temp_df$num_of_orders),][1:n, ]
+  department_dow_top5 <- rbind.fill(department_dow_top5, x_temp)
+  department_dow_top5 <-
+    department_dow_top5[!is.na(department_dow_top5$department), c("department", "order_dow", "num_of_orders", "day_week_name")]
+  
+}
+
+
+## Reording day names for ggplot
+department_dow_top5$day_ordered = factor(
+  department_dow_top5$day_week_name,
+  levels = c(
+    "Sunday",
+    "Monday",
+    "Tuesday",
+    "Wednesday",
+    "Thursday",
+    "Friday",
+    "Saturday"
+  )
+)
+
+
+### Creating and storing ggplot 
+top5_department_by_dow <-
+  ggplot(department_dow_top5,
+         aes(reorder(department,-num_of_orders), num_of_orders, fill = department)) +
+  geom_bar(
+    stat = "identity",
+    position = position_dodge(0.5),
+    colour = "black",
+    width = .8
+  ) +
+  facet_grid(. ~ day_ordered) +
+  theme(axis.text.x = element_blank(), axis.ticks.x = element_blank(),plot.title = element_text(hjust = 0.5)
+        ) +
+  guides(fill = guide_legend(title ="Department Color")) +
+  ggtitle("Top 5 Department in # of Orders by DOW") +
+  labs(x = "Deparment",  y = "Number of Orders")
+
+## Printing ggplot
+top5_department_by_dow
+
+```
+
+#### What are the Top 10 Departments being purchased during Customer's first order?
+
+```{r, fig.width=6,fig.height=4.5}
+first_order_ID <- orders[orders$order_number %in% "1", c("order_id")] 
+
+first_order_products <- left_join(
+  left_join(order_products, first_order_ID, by = c("order_id")), products_departments, by = "product_id"
+)
+
+first_order_products$order_id <- as.character(first_order_products$order_id)
+first_order_products$product_count <- 1
+top_departments_firstOrder <-
+  aggregate(order_id ~ department, first_order_products, length)
+
+names(top_departments_firstOrder) <-
+  c("department", "First_Order_Frequency")
+
+## Sorting by department frequency and keeping only top 10 departments purchased during first order
+top_departments_firstOrder_top10 <-
+  top_departments_firstOrder[order(-top_departments_firstOrder$First_Order_Frequency), ][1:10, ]
+
+## Plotting top 10 departments purchased on a customer's first order
+ggplot(top_departments_firstOrder_top10,
+       aes(
+         reorder(department,-First_Order_Frequency),
+         First_Order_Frequency
+       )) +
+  geom_bar(stat = "identity",
+           fill = "chartreuse2",
+           colour = "black") +
+  stat_summary(
+    aes(label = ..y..),
+    geom = "text",
+    vjust = +1.2,
+    size = 4
+  ) +
+  labs(title = "Top 10 Departments Purchased on Customer's First Order",
+       x = "Department", y = "# of Purchases during First Order") +
+  theme(plot.title = element_text(hjust = 0.5))
+```
+
+### Items
+    
+#### How many items does a customer order have ?
+```{r, fig.width=6,fig.height=4.5}
+total_order_size <- order_products_prior %>% 
+    select(add_to_cart_order) %>%
+        group_by(add_to_cart_order) %>%
+            dplyr::summarise(count=n())
+#head(total_order_size)
+ggplot(total_order_size) + aes(add_to_cart_order,count,color="coralred",fill="darkgreen") + geom_line() + 
+    ggtitle('Number of Items in Prior set Orders') + labs(y= "Number of Orders", x = "Items in Order")
+```
+
+#### Items sold most often (top10) 
+
+```{r fig.height=5.5}
+tmp <- order_products %>% 
+  group_by(product_id) %>% 
+  dplyr::summarize(count = n()) %>% 
+  top_n(10, wt = count) %>%
+  left_join(select(products,product_id,product_name),by="product_id") %>%
+  arrange(desc(count)) 
+#kable(tmp)
+
+tmp %>% 
+  ggplot(aes(x=reorder(product_name,-count), y=count,color="coralred",fill="darkgreen"))+
+  geom_bar(stat="identity")+
+  theme(axis.text.x=element_text(angle=90, hjust=1),axis.title.x = element_blank())
+
+```
+<br/>
+Banana is most purchase item followed Organic Strawberries and Baby Spinach.
+
+
+
+### Product Portfolio
+
+#### Visualizing the structure of instacarts product portfolio
+
+```{r, fig.width=10,fig.height=7}
+
+tmp <- products %>% group_by(department_id, aisle_id) %>% dplyr::summarize(n=n())
+tmp <- tmp %>% left_join(departments,by="department_id")
+tmp <- tmp %>% left_join(aisles,by="aisle_id")
+
+tmp2<-order_products %>% 
+  group_by(product_id) %>% 
+  dplyr::summarize(count=n()) %>% 
+  left_join(products,by="product_id") %>% 
+  ungroup() %>% 
+  group_by(department_id,aisle_id) %>% 
+  dplyr::summarize(sumcount = sum(count)) %>% 
+  left_join(tmp, by = c("department_id", "aisle_id")) %>% 
+  mutate(onesize = 1)
+
+treemap(tmp2,index=c("department","aisle"),vSize="onesize",vColor="department",palette="Set3",title="",sortID="-sumcount", border.col="#FFFFFF",type="categorical", fontsize.legend = 0,bg.labels = "#FFFFFF")
+
+```
+
+Market Basket Analysis
+=====================================  
+    
+Column {.tabset}
+-------------------------------------
+
+### Rules->For Products
+
+#### Rules generated with Support=0.01% and Confidence=50%
+
+```{r message=FALSE, warning=FALSE,include=FALSE}
+
+library(XML)
+library(pmml)
+rules1 = read.PMML("data/rules1.xml")
+
+```
+
+```{r,fig.width=15,fig.height=5}
+rules_dt1 <- data.table( lhs = labels( lhs(rules1) ), 
+                        rhs = labels( rhs(rules1) ), 
+                        quality(rules1) )[ order(-lift), ]
+kable(head(rules_dt1,10))
+glimpse(rules_dt1)
+
+
+```
+
+### Rules- Scatter Plot (For products)
+
+```{r,fig.width=8,fig.height=8}
+library(data.table)
+library(dplyr)
+library(ggplot2)
+library(knitr)
+library(stringr)
+library(DT)
+library(arules)
+library(arulesViz)
+library(plotly)
+library(visNetwork)
+library(igraph)
+
+plotly_arules(rules1)
+
+```
+
+
+```{r message=FALSE, warning=FALSE,include=FALSE}
+    subrules2 <- head(sort(rules1, by="confidence"),10)
+    ig <- plot( subrules2, method="graph", control=list(type="items") )
+    ig_df <- get.data.frame( ig, what = "both" )
+    nodesv <- data.frame(
+      id = ig_df$vertices$name
+      ,value = ig_df$vertices$support # could change to lift or confidence
+      ,title = ifelse(ig_df$vertices$label == "",ig_df$vertices$name, ig_df$vertices$label)
+      ,ig_df$vertices
+    ) 
+    
+   
+    ```
+      
+      
+### Rules- Network Graph Visual ( For products)
+    ```{r,fig.width=10,fig.height=10}
+      ### Network graph visualization Part 2
+    
+    
+    visNetwork(nodes = nodesv, edges =ig_df$edges, width = 900, height = 700) %>%
+      visNodes(size = 10) %>%
+      visLegend() %>%
+      visEdges(smooth = FALSE) %>%
+      visOptions(highlightNearest = TRUE, nodesIdSelection = TRUE) %>%
+      visInteraction(navigationButtons = TRUE) %>%
+      visEdges(arrows = 'from') %>%
+      visPhysics(
+        solver = "barnesHut",
+        maxVelocity = 35,
+        forceAtlas2Based = list(gravitationalConstant = -6000)
+      )
+    
+
+```
+
+
+### Rules->For Aisles
+
+#### Rules generated with Support=0.7% and Confidence=40%
+
+```{r message=FALSE, warning=FALSE,include=FALSE}
+
+library(XML)
+library(pmml)
+rules2 = read.PMML("data/rules2.xml")
+
+```
+
+```{r,fig.width=15,fig.height=5}
+rules_dt2 <- data.table( lhs = labels( lhs(rules2) ), 
+                        rhs = labels( rhs(rules2) ), 
+                        quality(rules2) )[ order(-lift), ]
+kable(head(rules_dt2,10))
+glimpse(rules_dt2)
+
+
+```
+
+### Rules- Scatter Plot ( For Aisles)
+
+```{r,fig.width=8,fig.height=8}
+library(data.table)
+library(dplyr)
+library(ggplot2)
+library(knitr)
+library(stringr)
+library(DT)
+library(arules)
+library(arulesViz)
+library(plotly)
+library(visNetwork)
+library(igraph)
+
+plotly_arules(rules2)
+
+```
+
+
+```{r message=FALSE, warning=FALSE,include=FALSE}
+    subrules2 <- head(sort(rules2, by="confidence"),10)
+    ig <- plot( subrules2, method="graph", control=list(type="items") )
+    ig_df <- get.data.frame( ig, what = "both" )
+    nodesv <- data.frame(
+      id = ig_df$vertices$name
+      ,value = ig_df$vertices$support # could change to lift or confidence
+      ,title = ifelse(ig_df$vertices$label == "",ig_df$vertices$name, ig_df$vertices$label)
+      ,ig_df$vertices
+    ) 
+    
+   
+    ```
+      
+      
+### Rules- Network Graph Visual (For Aisle)
+    ```{r,fig.width=10,fig.height=10}
+      ### Network graph visualization Part 2
+    
+    
+    visNetwork(nodes = nodesv, edges =ig_df$edges, width = 900, height = 700) %>%
+      visNodes(size = 10) %>%
+      visLegend() %>%
+      visEdges(smooth = FALSE) %>%
+      visOptions(highlightNearest = TRUE, nodesIdSelection = TRUE) %>%
+      visInteraction(navigationButtons = TRUE) %>%
+      visEdges(arrows = 'from') %>%
+      visPhysics(
+        solver = "barnesHut",
+        maxVelocity = 35,
+        forceAtlas2Based = list(gravitationalConstant = -6000)
+      )
+    
+
+```
+
+Recommendations by Implicit feedback-ALS
+=====================================  
+    
+Column {.tabset}
+-------------------------------------
+
+### User-Id:1
+
+
+#### All products recommended to user 1
+['Soda', '0% Greek Strained Yogurt', 'Clementines', 'Bag of Organic Bananas', 'Organic Half & Half', 'Apples', 'Zero Calorie Cola', "Crunchy Oats 'n Honey Granola Bars", 'Extra Fancy Unsalted Mixed Nuts', 'Reduced Fat 2% Milk']
+
+
+### User ID : 38
+
+####All products recommended to user 38
+
+['Organic Hass Avocado', 'Sparkling Water Grapefruit', 'Half & Half', 'Lime Sparkling Water', 'Sparkling Lemon Water', '2% Reduced Fat Milk', 'Organic Yellow Onion', 'Pure Sparkling Water', 'Organic Grape Tomatoes', 'Organic Garlic']
+
+
+
+### User ID : 796
+
+####All products recommended to user 796
+
+['Half & Half', 'Organic Avocado', 'Organic Fuji Apple', 'Banana', 'Large Lemon', 'Organic Strawberries', 'Bag of Organic Bananas', 'Unsweetened Almondmilk', 'Raspberries', 'Organic Large Brown Grade AA Cage Free Eggs']
+
+
+### User ID : 1000
+
+####All products recommended to user 1000
+
+['Spring Water', 'Cucumber Kirby', 'Organic Gala Apples', 'Organic Granny Smith Apple', 'Icelandic Style Skyr Blueberry Non-fat Yogurt', 'Non Fat Raspberry Yogurt', 'Vanilla Skyr Nonfat Yogurt', 'Organic Kiwi', 'Organic Grape Tomatoes', 'Nonfat Icelandic Style Strawberry Yogurt']
+
+
+### User ID : 421
+
+#### All products recommended to user 421
+
+['Strawberries', 'Organic Yellow Onion', 'Organic Garlic', 'Large Alfresco Eggs', 'Raspberries', 'Organic Garnet Sweet Potato (Yam)', 'Organic Grape Tomatoes', 'Fat Free Milk', 'Icelandic Style Skyr Blueberry Non-fat Yogurt', 'Organic Small Bunch Celery']
+
